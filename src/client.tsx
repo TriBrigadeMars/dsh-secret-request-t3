@@ -43,6 +43,8 @@ const styles = `
 .dsh-secret-card input:focus-visible, .dsh-secret-card button:focus-visible { outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary)); outline-offset: 3px; }
 .dsh-secret-card footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 8px; }
 .dsh-secret-card button { flex: none; min-height: 36px; border: 1px solid var(--dsw-alias-border-l4, #8886); border-radius: var(--dsw-radius-sm); padding: 6px 10px; font: inherit; cursor: pointer; background: transparent; color: inherit; }
+.dsh-secret-card .dsh-secret-link { display: inline-flex; align-items: center; min-height: 32px; padding: 4px 10px; border: 1px solid var(--dsw-alias-border-l4, #8886); border-radius: var(--dsw-radius-sm); color: inherit; text-decoration: none; }
+.dsh-secret-card .dsh-secret-link:hover { filter: brightness(.9); }
 .dsh-secret-card button[type=submit] { background: var(--dsw-alias-button-primary-fill, #222); border-color: transparent; color: var(--dsw-alias-label-primary-foreground, white); }
 .dsh-secret-card button:hover:not(:disabled) { filter: brightness(.9); }
 .dsh-secret-card button:disabled { opacity: .5; cursor: default; }
@@ -51,6 +53,18 @@ const styles = `
 `
 
 type Text = (typeof copy)[keyof typeof copy]
+
+/** One-line note that explains how long this value lives, keyed by delivery mode. */
+function deliveryNote(request: SecretRequest, text: Text): string {
+  if (request.delivery === 'secretRef') return text.oneUse
+  if (request.delivery === 'file') return text.fileNote
+  return text.privacy
+}
+
+/** Whole seconds left before `expiresAt`; never negative. Recomputed on render, no timer. */
+function secondsLeft(expiresAt: number): number {
+  return Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000))
+}
 
 function SecretForm({
   request,
@@ -137,13 +151,27 @@ function SecretForm({
           </code>
         </p>
       )}
+      {request.url && (
+        <p>
+          <a
+            className="dsh-secret-link"
+            href={request.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+          >
+            {text.openUrl}
+          </a>
+        </p>
+      )}
       <footer>
         <input
           ref={input}
           id={`secret-${request.id}`}
           aria-label={text.value}
           aria-describedby={`secret-target-${request.id} secret-privacy-${request.id}`}
-          placeholder={text.value}
+          placeholder={request.placeholder ?? text.value}
           type="password"
           autoComplete="off"
           spellCheck={false}
@@ -171,7 +199,7 @@ function SecretForm({
           {busy ? text.saving : text.save}
         </button>
       </footer>
-      <small id={`secret-privacy-${request.id}`}>{text.privacy}</small>
+      <small id={`secret-privacy-${request.id}`}>{deliveryNote(request, text)}</small>
       {error && <p role="alert">{text.error}</p>}
     </form>
   )
@@ -201,7 +229,10 @@ export function apply(ctx: Context) {
     const text = localizedCopy(copy, locale.active)
     // A card may only answer the live request for this exact session and call.
     const request = pending.find((item) => item.sessionId === props.sessionId && item.callId === props.callId)
-    let status: string | undefined = submitted && text[submitted]
+    const label = request?.label ?? props.block.args.text('label')
+    const reason = request?.reason ?? props.block.args.text('reason')
+    let status: string | undefined
+    let expired = false
     if (props.phase === 'result') {
       status = text.closed
       const content = props.block.content[0]
@@ -210,20 +241,36 @@ export function apply(ctx: Context) {
         if (
           !props.block.isError &&
           ['saved', 'declined', 'cancelled', 'timed_out', 'unavailable'].includes(result?.status)
-        )
+        ) {
           status = text[result.status as SecretStatus]
+          expired = result.status === 'timed_out'
+        }
       } catch {
         /* Do not echo raw results or error text into the private card. */
       }
+    } else if (submitted) {
+      status = text[submitted]
     }
     return (
-      <section className="dsh-secret-card" aria-label={text.title}>
+      <section className="dsh-secret-card" aria-label={text.title} title={label}>
         <h3>{text.title}</h3>
         <small>{text.context}</small>
-        <p className="dsh-secret-context">{request?.label ?? props.block.args.text('label')}</p>
-        <p className="dsh-secret-context">{request?.reason ?? props.block.args.text('reason')}</p>
+        <p className="dsh-secret-context">{label}</p>
+        <p className="dsh-secret-context">{reason}</p>
+        {!status && request?.expiresAt !== undefined && (
+          <small>{text.expiresIn.replace('{seconds}', String(secondsLeft(request.expiresAt)))}</small>
+        )}
         {status ? (
-          <p role="status">{status}</p>
+          [
+            <p key="status" role="status">
+              {status}
+            </p>,
+            expired ? (
+              <p key="hint" role="note">
+                {text.expiredHint}
+              </p>
+            ) : null,
+          ]
         ) : request && connection.interactions === 'answer' ? (
           <SecretForm key={request.id} request={request} text={text} connection={connection} onSettled={setSubmitted} />
         ) : (
