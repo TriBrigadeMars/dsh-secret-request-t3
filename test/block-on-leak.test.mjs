@@ -20,6 +20,7 @@ import * as ToolFs from '@deepseek-ai/dsh-tool-fs'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import { REDACTION } from '../dist/redact.js'
 import * as plugin from '../dist/index.js'
+import { assertNoDecodedVariant } from './decoded-strings.mjs'
 
 const owner = { principal: { kind: 'owner' }, interactions: 'answer' }
 const BLOCKED = 'Blocked: this tool result would disclose a requested secret.'
@@ -30,9 +31,31 @@ const BLOCKED = 'Blocked: this tool result would disclose a requested secret.'
  */
 const freshValue = (tag) => `${tag}_` + randomBytes(10).toString('hex') + '/+=&?'
 
+/**
+ * Every encoding the redactor is expected to make unmatchable. The JSON-escaped
+ * form covers the shape persistence writes for `"` and `\`; the per-line and
+ * truncation-prefix forms cover what a line-oriented tool (`read`) persists.
+ */
 const variantsOf = (value) => {
   const bytes = Buffer.from(value)
-  return [value, bytes.toString('base64'), bytes.toString('base64url'), encodeURIComponent(value), encodeURI(value)]
+  const shape = []
+  if (value.includes('\n')) {
+    for (const raw of value.split('\n')) {
+      const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw
+      if (line.length < 8) continue
+      shape.push(line, JSON.stringify(line).slice(1, -1))
+    }
+  }
+  if (value.length > 2000) shape.push(value.slice(0, 2000))
+  return [...new Set([
+    value,
+    JSON.stringify(value).slice(1, -1),
+    bytes.toString('base64'),
+    bytes.toString('base64url'),
+    encodeURIComponent(value),
+    encodeURI(value),
+    ...shape,
+  ])]
 }
 
 /** Every regular file under `directory`; the gate must see every byte on disk. */
@@ -140,18 +163,49 @@ async function harness(t, { realFs = false, persistence = false } = {}) {
     return result.value
   }
 
-  /** Assert the raw value and its tracked encodings appear in none of the files. */
+  /** Every parsed `tool/result` event in the plaintext JSONL log. */
+  const durableToolResults = async () => {
+    await ctx.sessions.flush(agent.session)
+    const events = []
+    for (const file of await walk(root)) {
+      if (!file.endsWith('.jsonl')) continue
+      const text = await readFile(file, 'utf8')
+      for (const line of text.split('\n')) {
+        if (line.trim() === '') continue
+        const event = JSON.parse(line)
+        if (event?.type === 'tool/result') events.push(event)
+      }
+    }
+    assert.ok(events.length > 0, 'no tool/result event reached the session log')
+    return events
+  }
+
+  /**
+   * Assert no variant appears on disk, both as raw bytes (the original
+   * assertion) and, for every JSONL line, in every decoded string. Raw bytes
+   * cannot see a JSON-escaped, split, or truncated value; decoding is what
+   * catches those.
+   */
   const assertAbsentOnDisk = async (value) => {
     await ctx.sessions.flush(agent.session)
     const files = await walk(root)
     assert.ok(files.length > 0, 'the session log was never materialized')
+    const variants = variantsOf(value)
     for (const file of files) {
       const text = await readFile(file, 'utf8')
-      for (const variant of variantsOf(value)) assert.ok(!text.includes(variant), `${file} leaked a secret variant`)
+      for (const variant of variants) assert.ok(!text.includes(variant), `${file} leaked a secret variant`)
+    }
+    for (const file of files) {
+      if (!file.endsWith('.jsonl')) continue
+      const text = await readFile(file, 'utf8')
+      for (const line of text.split('\n')) {
+        if (line.trim() === '') continue
+        assertNoDecodedVariant(JSON.parse(line), variants, file)
+      }
     }
   }
 
-  return { ctx, agent, session, rpc, run, deliver, assertAbsentOnDisk, root }
+  return { ctx, agent, session, rpc, run, deliver, assertAbsentOnDisk, durableToolResults, root }
 }
 
 await test('F1: the stock read tool returning a delivered value in meta is blocked and never persisted', async (t) => {
@@ -183,6 +237,49 @@ await test('F1: the stock read tool returning a delivered value in meta is block
   const line = JSON.stringify(sessionFormatCatalog.encodeCurrentEvent(durable))
   for (const variant of variantsOf(value)) assert.ok(!line.includes(variant), 'the durable event leaked a variant')
   await h.assertAbsentOnDisk(value)
+})
+
+/** The shapes a line-oriented JSON sink can turn a tracked value into. */
+const leakShapes = () => {
+  const id = randomBytes(8).toString('hex')
+  return [
+    ['quote and backslash', `F1q_${id}"\\/+=&?`],
+    ['newline split', `F1m_${id}_line1\nF1m_${id}_line2`],
+    ['longer than the read line cap', `F1L_${id}_` + 'A'.repeat(2500)],
+    ['plain control', freshValue('F1p')],
+  ]
+}
+
+await test('F1: escaped, split and truncated values in read meta are blocked and never persisted', async (t) => {
+  for (const [name, value] of leakShapes()) {
+    await t.test(name, async (t) => {
+      const h = await harness(t, { realFs: true, persistence: true })
+      const delivered = await h.deliver(
+        { label: 'Escaping gate', reason: 'Escaped, split, truncated leak probe.', delivery: 'file', timeoutMs: 60_000 },
+        value
+      )
+
+      const result = (
+        await h.run(
+          [{ type: 'tool-call', id: 'read-shape', name: 'read', arguments: JSON.stringify({ file_path: delivered.path }) }],
+          2
+        )
+      ).results[0].result
+
+      assert.equal(result.isError, true, 'the gate did not block the read')
+      assert.equal(result.error.message, BLOCKED)
+      assert.deepEqual(result.content, [{ type: 'text', text: BLOCKED }])
+      assert.equal(result.meta, undefined, 'a block must not carry the tool meta')
+
+      // The durable event is JSON: the escaped/split/truncated form only shows
+      // up as a decoded string, never as a raw-byte substring.
+      const variants = variantsOf(value)
+      for (const event of await h.durableToolResults()) {
+        assertNoDecodedVariant(event, variants, 'the durable tool/result event')
+      }
+      await h.assertAbsentOnDisk(value)
+    })
+  }
 })
 
 await test('an echo in plain content is redacted and accepted, not blocked', async (t) => {
