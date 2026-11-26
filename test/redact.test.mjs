@@ -108,6 +108,42 @@ await test('지정한 TTL이 지나면 추적을 멈춘다', async () => {
   assert.equal(redactor.scrub(value), value)
 })
 
+await test('같은 값을 더 긴 TTL로 다시 추가하면 추적 기한을 연장한다', async () => {
+  const value = freshValue()
+  const redactor = new Redactor()
+  redactor.add(value, 30)
+  redactor.add(value, 400)
+  await delay(70)
+  // The old early return kept the first 30 ms deadline and would leak here.
+  assert.equal(redactor.scrub(value), REDACTION)
+  redactor.dispose()
+})
+
+await test('같은 값을 더 짧은 TTL로 다시 추가해도 추적 기한을 줄이지 않는다', async () => {
+  const value = freshValue()
+  const redactor = new Redactor()
+  redactor.add(value, 400)
+  redactor.add(value, 10)
+  await delay(50)
+  assert.equal(redactor.scrub(value), REDACTION)
+  redactor.dispose()
+})
+
+await test('hasMatch는 추적된 값이 텍스트에 남았는지 알려준다', () => {
+  const value = freshValue()
+  const redactor = new Redactor()
+  redactor.add(value)
+  assert.equal(redactor.hasMatch(`prefix ${value} suffix`), true)
+  assert.equal(redactor.hasMatch(`prefix ${Buffer.from(value).toString('base64')} suffix`), true)
+  assert.equal(redactor.hasMatch('unrelated text'), false)
+  // The length floor keeps ordinary short output from blocking.
+  redactor.add('abcd')
+  assert.equal(redactor.hasMatch('value=abcd', 8), false)
+  assert.equal(redactor.hasMatch('value=abcd', 4), true)
+  redactor.dispose()
+  assert.equal(redactor.hasMatch(value), false)
+})
+
 await test('요청한 긴 TTL 동안에는 값이 계속 지워진다', async () => {
   const value = freshValue()
   const redactor = new Redactor()

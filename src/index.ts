@@ -126,6 +126,34 @@ export function apply(ctx: Context) {
       ),
     }))
 
+  /**
+   * Fixed refusal for a result that still carries a tracked value. The block
+   * path builds a fresh result with no `meta`, no `value` and replaced content,
+   * so it is the only outcome that drops channels (notably `meta`) this hook
+   * cannot rewrite. Feedback is a constant: no part of the value is echoed.
+   */
+  const blockedResult = (): PostToolDecision => ({
+    kind: 'block',
+    feedback: [{ type: 'text', text: 'Blocked: this tool result would disclose a requested secret.' }],
+  })
+
+  /**
+   * Check every post-scrub text channel for a tracked value. `accept` can only
+   * replace `content`; `meta`, deferred contexts, and an already-materialized
+   * frozen result are outside the decision's control. A match therefore means
+   * the value would reach persistence, and the call must be blocked.
+   */
+  const hasUnscrubbedValue = (result: ToolExecutionResult, decision: PostToolDecision): boolean => {
+    const channels = [
+      result.meta === undefined ? '' : safeStringify(result.meta),
+      safeStringify(decision.kind === 'accept' && decision.content !== undefined ? decision.content : result.content),
+      safeStringify(result.additionalContexts ?? []),
+      safeStringify(decision.additionalContexts ?? []),
+      result.isError ? result.error.message : '',
+    ]
+    return channels.some((text) => redactor.hasMatch(text, 8))
+  }
+
   ctx.on('tools/post-execute', async (exec, result, next) => {
     const decision = await next()
     let outcome: PostToolDecision = decision
@@ -191,6 +219,18 @@ export function apply(ctx: Context) {
         }
       } catch {
         // Best-effort, like every other step here.
+      }
+
+      // 5. Verify after scrubbing, then fail closed. `meta` and a frozen
+      // `additionalContexts` cannot be rewritten by an accept decision, and the
+      // in-place attempts above may have thrown. If a tracked value survives in
+      // any channel the only safe outcome is a block, which replaces content and
+      // drops both `meta` and tool-deferred contexts before persistence.
+      try {
+        if (exec.name !== 'request_secret' && hasUnscrubbedValue(result, outcome)) return blockedResult()
+      } catch {
+        // A verification failure must not degrade into an accepted result.
+        return blockedResult()
       }
     } catch {
       // Belt and braces: nothing in this hook may fail the user's tool call.
@@ -272,6 +312,11 @@ export function apply(ctx: Context) {
         if (view.delivery === undefined) {
           if (view.ref === undefined) return
           await ctx.credentials.set(credentialRef(view.ref), value)
+          // The legacy store has no expiry signal and its consumer may read the
+          // credential later, so keep scrubbing echoes of this value for 24 h —
+          // the same ceiling as file delivery. Best effort only: a consumer that
+          // runs beyond this horizon is outside what redaction can cover.
+          redactor.add(value, 24 * 60 * 60 * 1000)
           saved = true
           request.finish('saved', { ref: view.ref })
         } else if (view.delivery === 'secretRef') {
