@@ -1,7 +1,7 @@
 {
   "name": "dsh-secret-request-t3",
   "version": "0.5.0",
-  "description": "T3 Code-compatible request_secret for DeepSeek Harness: one-use secretRef and command-scoped file delivery, with an honest threat model.",
+  "description": "T3 Code-compatible request_secret for DeepSeek Harness: one-use secretRef and command-scoped file delivery, with a documented threat model.",
   "license": "MIT",
   "repository": {
     "type": "git",

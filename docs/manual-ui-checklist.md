@@ -1,9 +1,16 @@
 # Manual UI checklist (dsh web UI)
 
-Run these steps by hand in a real dsh web session. Automation covers the locale
-keys, the built card tree, and the host/broker protocol; it cannot drive the
-browser chat UI. The implementing agent cannot complete the web-UI steps in CI —
-the orchestrator runs them before release.
+**Status: not executed.** The orchestrating environment had no desktop browser
+connected, so the interactive steps below are unverified. What *was* verified is
+static and served-path only:
+
+- `dsh --profile web --dump-config` composes the `t3-secret-request` row.
+- Booting the web profile prints the UI URL with no "did not activate" warning.
+- The served client bundle contains `dsh-secret-card` and `Open credential page`.
+
+Run these steps by hand in a real dsh web session before claiming the card
+works end to end. Automation covers the locale keys, the built card tree, and
+the host/broker protocol; it cannot drive the browser chat UI.
 
 1. Trigger a `request_secret` tool call with `delivery: 'secretRef'`,
    `url`, `placeholder`, and `expiresAt` about one minute in the future.
