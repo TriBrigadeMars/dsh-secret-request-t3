@@ -13,14 +13,18 @@ import Projections from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
+import TimerService from '@deepseek-ai/cordis-plugin-timer'
 import * as plugin from '../dist/index.js'
 
 const owner = { principal: { kind: 'owner' }, interactions: 'answer' }
 const args = { ref: 'DSH_SECRET_TEST', label: 'Test credential', reason: 'Used by the test DSH provider.' }
 
-async function setup(t, provider) {
+async function setup(t, provider, options = {}) {
   const ctx = new Context()
   t.after(() => ctx.fiber.dispose())
+  // Real host timer seam unless a test injects a recording fake.
+  if (options.timer) ctx.provide('timer', options.timer)
+  else await ctx.plugin(TimerService)
   const directory = await mkdtemp(join(tmpdir(), 'dsh-secret-test-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
   const path = join(directory, 'credentials.yaml')
@@ -478,4 +482,63 @@ await test('다른 세션은 발급된 secretRef를 소비할 수 없다', async
     (error) => error.code === 'session_mismatch'
   )
   assert.equal(broker.consume(secretRef, 'secret-test-session'), value)
+})
+
+await test('만료는 호스트 타이머 서비스로 예약되고 그 콜백이 참조를 죽인다', async (t) => {
+  const scheduled = []
+  const h = await setup(t, undefined, {
+    timer: {
+      timeout: (fire, delayMs) => {
+        scheduled.push({ fire, delayMs })
+        return () => {}
+      },
+    },
+  })
+  await h.rpc('pending')
+  const running = h.run(deliveryArgs({ timeoutMs: 60_000 }))
+  const request = await h.next()
+  await answerWith(h, request, freshValue())
+  const { secretRef } = (await running).value
+  // One schedule, through the host seam, for the advertised TTL (mint happens
+  // after the user answers, so the remaining budget is slightly under 60s).
+  assert.equal(scheduled.length, 1)
+  assert.ok(scheduled[0].delayMs > 55_000 && scheduled[0].delayMs <= 60_000)
+  const broker = h.ctx.get('secretRefs')
+  const value = broker.consume(secretRef, 'secret-test-session')
+  assert.ok(value.startsWith('ts_'))
+  scheduled[0].fire()
+  assert.throws(
+    () => broker.consume(secretRef, 'secret-test-session'),
+    (error) => error.code === 'consumed'
+  )
+})
+
+await test('파일 삭제도 같은 호스트 타이머 서비스로 예약된다', async (t) => {
+  const scheduled = []
+  const h = await setup(t, undefined, {
+    timer: {
+      timeout: (fire, delayMs) => {
+        scheduled.push({ fire, delayMs })
+        return () => {}
+      },
+    },
+  })
+  await h.rpc('pending')
+  const running = h.run(deliveryArgs({ delivery: 'file', timeoutMs: 60_000 }))
+  const request = await h.next()
+  await answerWith(h, request, freshValue())
+  const result = (await running).value
+  assert.equal(result.delivery, 'file')
+  assert.equal(scheduled.length, 1)
+  assert.ok(scheduled[0].delayMs > 55_000 && scheduled[0].delayMs <= 60_000)
+  scheduled[0].fire()
+  for (let i = 0; i < 100; i++) {
+    try {
+      await stat(result.path)
+      await delay(10)
+    } catch {
+      return
+    }
+  }
+  assert.fail('the expiry callback did not delete the delivered file')
 })

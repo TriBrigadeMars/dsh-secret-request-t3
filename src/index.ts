@@ -15,15 +15,14 @@ import {
 import { SecretBroker } from './broker.js'
 import { FileDelivery, type AtRest } from './files.js'
 
-declare module '@deepseek-ai/cordis' {
-  interface Context {
-    /**
-     * Disposal-aware timer seam installed by the host timer plugin. The pinned
-     * standalone test Context has no timer plugin, so callers must tolerate it
-     * being absent and fall back to an unref'd host timer.
-     */
-    timeout?: (callback: () => void, delayMs: number) => unknown
-  }
+/**
+ * The host timer service (cordis-plugin-timer) as this plugin uses it. Reached
+ * through the unguarded `ctx.get('timer')` accessor because `timer` is not a
+ * hard injection: a host without the timer row still runs the tool, and the
+ * broker's lazy deadline check keeps expiry correct.
+ */
+interface TimerSeam {
+  timeout?: (callback: () => void, delayMs: number) => unknown
 }
 
 export const name = 't3-secret-request'
@@ -125,15 +124,16 @@ export function apply(ctx: Context) {
    */
   const schedule = (fire: () => void, delayMs: number): void => {
     const delay = Math.max(0, delayMs)
-    try {
-      // Reading an uninjected cordis service throws, so the probe must be
-      // inside the same guard as the call.
-      if (typeof ctx.timeout === 'function') {
-        ctx.timeout(fire, delay)
+    // `ctx.timeout` is guarded by cordis inject and throws in this fiber;
+    // `ctx.get('timer')` reads the service without that requirement.
+    const timer = ctx.get('timer') as TimerSeam | undefined
+    if (typeof timer?.timeout === 'function') {
+      try {
+        timer.timeout(fire, delay)
         return
+      } catch {
+        // Fall through to a plain timer; the lazy check still enforces the deadline.
       }
-    } catch {
-      // No timer service in this host; fall through to a plain timer.
     }
     setTimeout(fire, delay).unref()
   }
