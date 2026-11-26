@@ -28,6 +28,8 @@ const defaultTtlMs = 24 * 60 * 60 * 1000
 interface Entry {
   /** Unique encodings of one submitted value, longest first. */
   readonly variants: readonly string[]
+  /** Wall-clock deadline; a later `add` may push it further out. */
+  readonly expiresAt: number
   readonly timer: { unref?: () => void }
 }
 
@@ -46,13 +48,24 @@ export class Redactor {
    * Track one submitted value until {@link dispose} or `ttlMs`.
    *
    * Stored encodings: the raw value, base64, base64url, `encodeURIComponent`,
-   * and `encodeURI`. Adding the same value twice keeps the first TTL. Callers
-   * pass the remaining lifetime of the delivery that owns the value so the
-   * tracking never ends before that delivery does.
+   * and `encodeURI`. Adding an already-tracked value extends tracking to the
+   * later of the two deadlines instead of returning early: a second delivery
+   * that still owns the same value must not lose its scrub window. Callers pass
+   * the remaining lifetime of the delivery that owns the value so the tracking
+   * never ends before that delivery does.
    */
   add(value: string, ttlMs = defaultTtlMs): void {
     if (value.length < minTrackedLength) return
-    if (this.entries.has(value)) return
+    const expiresAt = Date.now() + Math.max(0, ttlMs)
+    const existing = this.entries.get(value)
+    if (existing !== undefined) {
+      if (expiresAt <= existing.expiresAt) return
+      clearTimeout(existing.timer as NodeJS.Timeout)
+      const timer = setTimeout(() => this.drop(value), expiresAt - Date.now())
+      timer.unref?.()
+      this.entries.set(value, { variants: existing.variants, expiresAt, timer })
+      return
+    }
 
     const bytes = Buffer.from(value)
     const variants = [...new Set([
@@ -63,9 +76,9 @@ export class Redactor {
       encodeURI(value),
     ])].sort((left, right) => right.length - left.length || left.localeCompare(right))
 
-    const timer = setTimeout(() => this.drop(value), Math.max(0, ttlMs))
+    const timer = setTimeout(() => this.drop(value), expiresAt - Date.now())
     timer.unref?.()
-    const entry: Entry = { variants, timer }
+    const entry: Entry = { variants, expiresAt, timer }
     this.entries.set(value, entry)
     this.rebuild()
   }
@@ -77,6 +90,18 @@ export class Redactor {
       if (output.includes(variant)) output = output.split(variant).join(REDACTION)
     }
     return output
+  }
+
+  /**
+   * Whether `text` still contains a tracked variant at least `minLength` long.
+   *
+   * Used only to decide whether a result must be blocked after scrubbing. The
+   * floor avoids blocking an ordinary short value ("abcd") that happens to occur
+   * in unrelated output; a real credential is longer than this. Scrubbing is
+   * not affected.
+   */
+  hasMatch(text: string, minLength = 8): boolean {
+    return this.ordered.some((variant) => variant.length >= minLength && text.includes(variant))
   }
 
   /** Clear every tracked value and its timer. */
