@@ -126,10 +126,10 @@ function SecretForm({
       <p id={`secret-target-${request.id}`}>
         <strong>{text.target}: </strong>
         <code>
-          <bdi dir="ltr">{request.ref}</bdi>
+          <bdi dir="ltr">{request.ref ?? request.label}</bdi>
         </code>
       </p>
-      {request.configured && (
+      {request.ref && request.configured && (
         <p>
           {text.replace}{' '}
           <code>

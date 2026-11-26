@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { randomBytes } from 'node:crypto'
 import { mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -189,4 +190,107 @@ await test('저장 실패를 정제하고 쓰기 도중 취소를 포함해 동�
   assert.ok(!JSON.stringify(result).includes(secret))
   assert.equal(stored, secret)
   assert.deepEqual((await h.rpc('pending')).value, [])
+})
+
+/** Fresh throwaway value per test; never a real-looking credential. */
+const freshValue = () => 'ts_' + randomBytes(16).toString('hex')
+
+const deliveryArgs = (value = {}) => ({
+  label: 'One-use test token',
+  reason: 'Used by the test consumer exactly once.',
+  delivery: 'secretRef',
+  timeoutMs: 60_000,
+  ...value,
+})
+
+const answerWith = async (h, request, value) => {
+  const answer = await h.rpc('answer', { id: request.id, action: 'save', value })
+  assert.deepEqual(answer, { ok: true, value: null })
+  return answer
+}
+
+await test('secretRef 모드는 일회용 참조만 반환하고 제출한 값을 결과에 남기지 않는다', async (t) => {
+  const h = await setup(t)
+  await h.rpc('pending')
+  const value = freshValue()
+  const running = h.run(deliveryArgs())
+  const request = await h.next()
+  assert.equal(request.delivery, 'secretRef')
+  assert.equal(request.configured, false)
+  assert.equal(request.ref, undefined)
+  assert.ok(request.expiresAt > Date.now())
+  const answer = await answerWith(h, request, value)
+  const result = await running
+  assert.equal(result.isError, false)
+  assert.equal(result.value.status, 'saved')
+  assert.equal(result.value.delivery, 'secretRef')
+  assert.match(result.value.secretRef, /^sr_/)
+  assert.ok(Number.isInteger(result.value.expiresAt))
+  assert.ok(result.value.expiresAt > Date.now())
+  assert.ok(!JSON.stringify(result).includes(value))
+  assert.ok(!result.content[0].text.includes(value))
+  assert.ok(!JSON.stringify([request, answer]).includes(value))
+  assert.deepEqual((await h.rpc('pending')).value, [])
+})
+
+await test('발급된 secretRef는 같은 세션에서 정확히 한 번만 값을 돌려준다', async (t) => {
+  const h = await setup(t)
+  await h.rpc('pending')
+  const value = freshValue()
+  const running = h.run(deliveryArgs())
+  const request = await h.next()
+  await answerWith(h, request, value)
+  const { secretRef } = (await running).value
+  const broker = h.ctx.get('secretRefs')
+  assert.equal(broker.consume(secretRef, 'secret-test-session'), value)
+  assert.throws(
+    () => broker.consume(secretRef, 'secret-test-session'),
+    (error) => error.code === 'consumed'
+  )
+})
+
+await test('file 배달은 아직 구현되지 않았으므로 unavailable로 정직하게 답한다', async (t) => {
+  const h = await setup(t)
+  await h.rpc('pending')
+  const value = freshValue()
+  const running = h.run(deliveryArgs({ delivery: 'file' }))
+  const request = await h.next()
+  assert.equal(request.delivery, 'file')
+  await answerWith(h, request, value)
+  const result = await running
+  assert.equal(result.isError, false)
+  assert.deepEqual(result.value, { status: 'unavailable' })
+  assert.ok(!JSON.stringify(result).includes(value))
+  assert.deepEqual((await h.rpc('pending')).value, [])
+})
+
+await test('같은 clientRequestId 재시도는 새로 발급하지 않고 같은 결과를 돌려준다', async (t) => {
+  const h = await setup(t)
+  await h.rpc('pending')
+  const input = deliveryArgs({ clientRequestId: 'idem-delivery-1' })
+  const first = h.run(input)
+  const request = await h.next()
+  await answerWith(h, request, freshValue())
+  const firstResult = await first
+  assert.equal(firstResult.value.status, 'saved')
+  const second = await h.run(input)
+  assert.deepEqual(second.value, firstResult.value)
+  assert.equal(second.value.secretRef, firstResult.value.secretRef)
+  assert.deepEqual((await h.rpc('pending')).value, [])
+})
+
+await test('다른 세션은 발급된 secretRef를 소비할 수 없다', async (t) => {
+  const h = await setup(t)
+  await h.rpc('pending')
+  const value = freshValue()
+  const running = h.run(deliveryArgs())
+  const request = await h.next()
+  await answerWith(h, request, value)
+  const { secretRef } = (await running).value
+  const broker = h.ctx.get('secretRefs')
+  assert.throws(
+    () => broker.consume(secretRef, 'another-session'),
+    (error) => error.code === 'session_mismatch'
+  )
+  assert.equal(broker.consume(secretRef, 'secret-test-session'), value)
 })
