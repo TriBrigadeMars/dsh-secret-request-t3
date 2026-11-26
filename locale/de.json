@@ -6,7 +6,7 @@
   "ui": {
     "title": "Private Eingabe geheimer Werte",
     "value": "Geheimer Wert",
-    "privacy": "Ihr geheimer Wert wird dem Agenten nicht angezeigt.",
+    "privacy": "Dieser Wert wird im Anmeldedatenspeicher des Hosts gespeichert, nicht im Chat.",
     "openUrl": "Seite für Zugangsdaten öffnen",
     "oneUse": "Dieser Wert wird nur einmal gespeichert; der Agent erhält nur eine Referenz darauf.",
     "fileNote": "Dieser Wert wird nur für diesen Befehl in eine private Datei geschrieben.",

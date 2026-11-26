@@ -66,6 +66,19 @@ function secondsLeft(expiresAt: number): number {
   return Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000))
 }
 
+/**
+ * Destination host for a model-supplied link. The URL is untrusted, so a
+ * malformed value falls back to showing no host instead of failing the card.
+ */
+function linkHost(url: string | undefined): string | undefined {
+  if (url === undefined) return undefined
+  try {
+    return new URL(url).host || undefined
+  } catch {
+    return undefined
+  }
+}
+
 function SecretForm({
   request,
   text,
@@ -125,6 +138,8 @@ function SecretForm({
     if (error && !busy) input.current?.focus()
   }, [error, busy])
 
+  const host = linkHost(request.url)
+
   return (
     <form
       onSubmit={(event) => {
@@ -161,7 +176,7 @@ function SecretForm({
             onClick={(event) => event.stopPropagation()}
             onKeyDown={(event) => event.stopPropagation()}
           >
-            {text.openUrl}
+            {host ? `${text.openUrl} · ${host}` : text.openUrl}
           </a>
         </p>
       )}

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -96,4 +96,57 @@ await test('disposeAll removes every tracked file', { skip: !posix }, async (t) 
   await files.disposeAll()
   assert.equal(await missing(first.directory), true)
   assert.equal(await missing(second.directory), true)
+})
+
+await test('removeReferenced matches a raw path and its JSON-escaped form', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-secret-files-escape-'))
+  // A backslash in the temporary root reproduces the Windows spelling of the
+  // path on POSIX without needing a Windows host.
+  const tmpRoot = posix ? join(root, 'C:\\Users\\tester') : root
+  if (posix) await mkdir(tmpRoot, { recursive: true })
+  const files = new FileDelivery({ tmpRoot })
+  t.after(async () => {
+    await files.disposeAll()
+    await rm(root, { recursive: true, force: true })
+  })
+
+  const raw = await files.create({ sessionId: 'session-a', callId: 'call-1', value: freshValue(), ttlMs: 60_000 })
+  assert.ok(raw.path.includes('\\'), 'fixture path contains a backslash')
+  assert.deepEqual(await files.removeReferenced('session-a', `curl --config "${raw.path}"`), [raw.path])
+  assert.equal(await missing(raw.directory), true)
+
+  const escapedFile = await files.create({ sessionId: 'session-a', callId: 'call-2', value: freshValue(), ttlMs: 60_000 })
+  const escaped = JSON.stringify(escapedFile.path).slice(1, -1)
+  assert.notEqual(escaped, escapedFile.path, 'JSON form doubles the backslashes')
+  // The consuming call's arguments are stringified JSON, so only this form appears.
+  assert.deepEqual(
+    await files.removeReferenced('session-a', JSON.stringify({ command: escapedFile.path })),
+    [escapedFile.path]
+  )
+  assert.equal(await missing(escapedFile.directory), true)
+})
+
+await test('disposeAll racing an in-flight create leaves no file behind', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-secret-files-race-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const files = new FileDelivery({ tmpRoot: root })
+
+  const creating = files.create({ sessionId: 'session-a', callId: 'call-1', value: freshValue(), ttlMs: 60_000 })
+  // `create` is already suspended at mkdtemp, so the sweep sets the flag first.
+  await files.disposeAll()
+  await assert.rejects(creating, /could not be created/)
+  assert.deepEqual(await readdir(root), [])
+})
+
+await test('a create after disposeAll rejects and leaves nothing behind', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-secret-files-disposed-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const files = new FileDelivery({ tmpRoot: root })
+
+  await files.disposeAll()
+  await assert.rejects(
+    files.create({ sessionId: 'session-a', callId: 'call-1', value: freshValue(), ttlMs: 60_000 }),
+    /could not be created/
+  )
+  assert.deepEqual(await readdir(root), [])
 })

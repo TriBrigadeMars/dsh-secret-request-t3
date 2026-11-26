@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import { parseRpcRequest, rpcResponse } from './vendor/rpc.js'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { defineTool, type PostToolDecision, type ToolExecutionResult, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import {
   channel,
   endpointPrefix,
@@ -40,6 +40,9 @@ interface ToolResultValue {
 }
 
 type ResultExtra = Omit<ToolResultValue, 'status'>
+
+/** Deferred context the executor carries from a tool body to the agent loop. */
+type AdditionalContexts = NonNullable<ToolExecutionResult['additionalContexts']>
 
 interface Pending {
   view: SecretRequest
@@ -93,7 +96,12 @@ export function apply(ctx: Context) {
   ctx.provide('secretRefs', broker)
   ctx.effect(() => () => broker.dispose(), 'request-secret: broker')
   ctx.effect(() => () => redactor.dispose(), 'request-secret: redaction')
-  ctx.effect(() => () => { void files.disposeAll() }, 'request-secret: delivered files')
+  ctx.effect(
+    () => async () => {
+      await files.disposeAll()
+    },
+    'request-secret: delivered files'
+  )
 
   ctx.effect(
     () => async () => {
@@ -110,9 +118,17 @@ export function apply(ctx: Context) {
   // variants out of the model-facing text before the result is persisted.
   // Scrubbing is best-effort defence in depth, never a guarantee; a bug in it
   // must not fail the user's call, and it must not skip file cleanup.
+  const scrubContexts = (contexts: AdditionalContexts): AdditionalContexts =>
+    contexts.map((context) => ({
+      ...context,
+      content: context.content.map((block) =>
+        block.type === 'text' ? { ...block, text: redactor.scrub(block.text) } : block
+      ),
+    }))
+
   ctx.on('tools/post-execute', async (exec, result, next) => {
     const decision = await next()
-    let outcome = decision
+    let outcome: PostToolDecision = decision
     try {
       // 1. File cleanup first so a scrubbing failure cannot leave a file behind.
       try {
@@ -146,6 +162,35 @@ export function apply(ctx: Context) {
         }
       } catch {
         // Redaction is best-effort; the original result is still returned.
+      }
+
+      // 3. Scrub deferred context. The executor merges `result.additionalContexts`
+      // into the delivered result AFTER this waterfall, so the decision alone
+      // cannot replace it: mutate the property in place as a deliberate
+      // mitigation of that core merge order. The decision's own contexts are
+      // returned scrubbed.
+      try {
+        if (result.additionalContexts !== undefined) {
+          const mutable = result as { additionalContexts?: AdditionalContexts }
+          mutable.additionalContexts = scrubContexts(result.additionalContexts)
+        }
+        if (decision.additionalContexts !== undefined) {
+          outcome = { ...outcome, additionalContexts: scrubContexts(decision.additionalContexts) }
+        }
+      } catch {
+        // Best-effort: an immutable result still reaches the loop unmodified.
+      }
+
+      // 4. Scrub the live failure message in place. The durable event omits it,
+      // but observers and log sinks that see the result object must not receive
+      // a value the tool happened to echo in its error.
+      try {
+        if (result.isError) {
+          const mutable = result as { error: { message: string } }
+          mutable.error.message = redactor.scrub(mutable.error.message)
+        }
+      } catch {
+        // Best-effort, like every other step here.
       }
     } catch {
       // Belt and braces: nothing in this hook may fail the user's tool call.
@@ -238,8 +283,9 @@ export function apply(ctx: Context) {
             ttlMs: remaining,
           })
           // Track before settling the call so a consumer that echoes the value
-          // in the very next step is already scrubbed.
-          redactor.add(value)
+          // in the very next step is already scrubbed. Keep it for exactly as
+          // long as the reference lives.
+          redactor.add(value, remaining)
           saveExpiry(minted.secretRef, minted.expiresAt)
           saved = true
           request.finish('saved', {
@@ -257,7 +303,7 @@ export function apply(ctx: Context) {
             value,
             ttlMs: remaining,
           })
-          redactor.add(value)
+          redactor.add(value, remaining)
           try {
             schedule(() => void files.remove(file), file.expiresAt - Date.now())
           } catch {

@@ -6,7 +6,7 @@
   "ui": {
     "title": "Private secret input",
     "value": "Secret value",
-    "privacy": "Your secret is not shown to the agent.",
+    "privacy": "This value goes to the host credential store, not into the chat.",
     "openUrl": "Open credential page",
     "oneUse": "This value is stored once and the agent only ever receives a reference to it.",
     "fileNote": "This value is written to a private file for this command only.",

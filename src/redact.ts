@@ -17,8 +17,13 @@ export const REDACTION = '[redacted:secret]'
  */
 const minTrackedLength = 4
 
-/** A tracked value is forgotten ten minutes after `add`. */
-const ttlMs = 10 * 60 * 1000
+/**
+ * Default retention for a tracked value. Delivery may live for up to 24 hours
+ * (the file delivery ceiling), so the default matches that ceiling instead of a
+ * shorter constant: a value forgotten before its reference or file expires
+ * would leave later echoes of it unscrubbed.
+ */
+const defaultTtlMs = 24 * 60 * 60 * 1000
 
 interface Entry {
   /** Unique encodings of one submitted value, longest first. */
@@ -38,12 +43,14 @@ export class Redactor {
   private ordered: readonly string[] = []
 
   /**
-   * Track one submitted value until {@link dispose} or its TTL.
+   * Track one submitted value until {@link dispose} or `ttlMs`.
    *
    * Stored encodings: the raw value, base64, base64url, `encodeURIComponent`,
-   * and `encodeURI`. Adding the same value twice keeps the first TTL.
+   * and `encodeURI`. Adding the same value twice keeps the first TTL. Callers
+   * pass the remaining lifetime of the delivery that owns the value so the
+   * tracking never ends before that delivery does.
    */
-  add(value: string): void {
+  add(value: string, ttlMs = defaultTtlMs): void {
     if (value.length < minTrackedLength) return
     if (this.entries.has(value)) return
 
@@ -56,7 +63,7 @@ export class Redactor {
       encodeURI(value),
     ])].sort((left, right) => right.length - left.length || left.localeCompare(right))
 
-    const timer = setTimeout(() => this.drop(value), ttlMs)
+    const timer = setTimeout(() => this.drop(value), Math.max(0, ttlMs))
     timer.unref?.()
     const entry: Entry = { variants, timer }
     this.entries.set(value, entry)
