@@ -426,6 +426,7 @@ await test('file 모드는 비공개 파일 경로만 반환하고 제출한 값
   assert.equal(typeof result.value.path, 'string')
   assert.ok(Number.isInteger(result.value.expiresAt))
   assert.ok(result.value.expiresAt > Date.now())
+  t.diagnostic(`file delivery atRest=${result.value.atRest} platform=${process.platform}`)
   if (process.platform === 'win32') {
     // ACLs are best effort; report whichever guarantee the host actually met.
     assert.ok(result.value.atRest === 'windows-acl' || result.value.atRest === 'unrestricted')
