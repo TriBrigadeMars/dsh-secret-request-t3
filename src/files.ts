@@ -43,6 +43,8 @@ export class FileDelivery {
   private readonly platform: NodeJS.Platform
   private readonly tmpRoot: string
   private readonly windowsUser: string | undefined
+  /** Set by {@link disposeAll}; a create that outlives disposal must not leave a file. */
+  private disposed = false
 
   constructor({ platform = process.platform, tmpRoot = tmpdir() }: { platform?: NodeJS.Platform; tmpRoot?: string } = {}) {
     this.platform = platform
@@ -108,6 +110,12 @@ export class FileDelivery {
         atRest,
       }
       this.files.set(path, file)
+      // A disposal sweep that ran while this write was in flight snapshotted an
+      // empty map, so re-check after publishing and remove the file ourselves.
+      if (this.disposed) {
+        await this.remove(file)
+        throw new Error(failure)
+      }
       return file
     } catch {
       if (directory !== undefined) {
@@ -142,9 +150,14 @@ export class FileDelivery {
    * deletion to the call that actually names the path. Returns removed paths.
    */
   async removeReferenced(sessionId: string, text: string): Promise<string[]> {
-    const matches = [...this.files.values()].filter(
-      (file) => file.sessionId === sessionId && text.includes(file.path)
-    )
+    const matches = [...this.files.values()].filter((file) => {
+      if (file.sessionId !== sessionId) return false
+      // A caller that embeds the path in JSON (the usual case) contains the
+      // JSON-escaped spelling instead of the raw path. Windows separators are
+      // doubled there, so match both forms.
+      const escaped = JSON.stringify(file.path).slice(1, -1)
+      return text.includes(file.path) || text.includes(escaped)
+    })
     const removed: string[] = []
     for (const file of matches) {
       await this.remove(file)
@@ -155,6 +168,7 @@ export class FileDelivery {
 
   /** Remove every delivered file. Used by plugin disposal; never throws. */
   async disposeAll(): Promise<void> {
+    this.disposed = true
     const all = [...this.files.values()]
     await Promise.all(all.map((file) => this.remove(file).catch(() => {})))
   }

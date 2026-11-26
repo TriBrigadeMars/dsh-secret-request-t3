@@ -6,7 +6,7 @@
   "ui": {
     "title": "Saisie privée de secrets",
     "value": "Valeur secrète",
-    "privacy": "Votre secret n’est pas montré à l’agent.",
+    "privacy": "Cette valeur est envoyée au stockage des identifiants de l’hôte, pas dans la conversation.",
     "openUrl": "Ouvrir la page des identifiants",
     "oneUse": "Cette valeur n’est enregistrée qu’une seule fois et l’agent n’en reçoit qu’une référence.",
     "fileNote": "Cette valeur est écrite dans un fichier privé réservé à cette commande.",

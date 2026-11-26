@@ -15,6 +15,7 @@ import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import TimerService from '@deepseek-ai/cordis-plugin-timer'
 import * as plugin from '../dist/index.js'
+import { REDACTION } from '../dist/redact.js'
 
 const owner = { principal: { kind: 'owner' }, interactions: 'answer' }
 const args = { ref: 'DSH_SECRET_TEST', label: 'Test credential', reason: 'Used by the test DSH provider.' }
@@ -309,6 +310,102 @@ await test('발급된 secretRef는 같은 세션에서 정확히 한 번만 값�
     () => broker.consume(secretRef, 'secret-test-session'),
     (error) => error.code === 'consumed'
   )
+})
+
+await test('도구가 deferContext로 전달한 값도 결과 문맥에서 지운다', async (t) => {
+  const h = await setup(t)
+  await h.rpc('pending')
+  const value = freshValue()
+  const running = h.run(deliveryArgs())
+  const request = await h.next()
+  await answerWith(h, request, value)
+  await running
+
+  h.ctx.tools.register(
+    defineTool({
+      name: 'defer_echo',
+      description: 'Defers an echoed secret as extra context.',
+      parameters: {},
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { ok: { type: 'boolean', required: true } },
+        },
+        render: (_args, result) => [{ type: 'text', text: JSON.stringify(result) }],
+      },
+      execute(_args, exec) {
+        // A consumer that legitimately held the value can ferry it as context.
+        exec.deferContext({ content: [{ type: 'text', text: value }], source: { kind: 'user' } })
+        return { ok: true }
+      },
+    })
+  )
+  const result = await runTool(h, 'defer_echo', {})
+  assert.equal(result.isError, false)
+  const contexts = JSON.stringify(result.additionalContexts)
+  assert.ok(contexts.includes(REDACTION), 'the deferred text block is replaced')
+  assert.ok(!contexts.includes(value), 'the value never reaches the delivered context')
+})
+
+await test('다른 post-execute 리스너가 붙인 문맥도 결과로 전달되기 전에 지운다', async (t) => {
+  const h = await setup(t)
+  await h.rpc('pending')
+  const value = freshValue()
+  const running = h.run(deliveryArgs())
+  const request = await h.next()
+  await answerWith(h, request, value)
+  await running
+
+  // Registered after the plugin, so its decision reaches the plugin's `next()`.
+  h.ctx.on('tools/post-execute', async (_exec, _result, next) => {
+    const decision = await next()
+    return {
+      ...decision,
+      additionalContexts: [{ content: [{ type: 'text', text: value }], source: { kind: 'user' } }],
+    }
+  })
+  registerConsumer(h, async () => ({ length: 0 }), 'defer_from_policy', {})
+  const result = await runTool(h, 'defer_from_policy', {})
+  assert.equal(result.isError, false)
+  const contexts = JSON.stringify(result.additionalContexts)
+  assert.ok(contexts.includes(REDACTION))
+  assert.ok(!contexts.includes(value))
+})
+
+await test('도구가 오류 메시지에 값을 되돌려도 결과의 오류 문구를 지운다', async (t) => {
+  const h = await setup(t)
+  await h.rpc('pending')
+  const value = freshValue()
+  const running = h.run(deliveryArgs())
+  const request = await h.next()
+  await answerWith(h, request, value)
+  const { secretRef } = (await running).value
+
+  h.ctx.tools.register(
+    defineTool({
+      name: 'echo_error',
+      description: 'Throws with the consumed value in the message.',
+      parameters: {},
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { ok: { type: 'boolean', required: true } },
+        },
+        render: (_args, result) => [{ type: 'text', text: JSON.stringify(result) }],
+      },
+      execute() {
+        const consumed = h.ctx.get('secretRefs').consume(secretRef, 'secret-test-session')
+        throw new Error(`provider echoed ${consumed}`)
+      },
+    })
+  )
+  const result = await runTool(h, 'echo_error', {})
+  assert.equal(result.isError, true)
+  assert.ok(result.error.message.includes(REDACTION))
+  assert.ok(!result.error.message.includes(value))
+  assert.ok(!result.content[0].text.includes(value))
 })
 
 await test('file 모드는 비공개 파일 경로만 반환하고 제출한 값을 결과에 남기지 않는다', async (t) => {

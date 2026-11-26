@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
 import test from 'node:test'
+import { setTimeout as delay } from 'node:timers/promises'
 import { REDACTION, Redactor } from '../dist/redact.js'
 
 /**
@@ -95,4 +96,23 @@ await test('dispose는 추적 값과 타이머를 지우고 이후 삭제를 멈
   // A second dispose is harmless.
   redactor.dispose()
   assert.equal(redactor.scrub(encodeURIComponent(value)), encodeURIComponent(value))
+})
+
+await test('지정한 TTL이 지나면 추적을 멈춘다', async () => {
+  const value = freshValue()
+  const redactor = new Redactor()
+  redactor.add(value, 30)
+  assert.equal(redactor.scrub(value), REDACTION)
+  await delay(60)
+  // The old fixed ten-minute lifetime would still scrub here.
+  assert.equal(redactor.scrub(value), value)
+})
+
+await test('요청한 긴 TTL 동안에는 값이 계속 지워진다', async () => {
+  const value = freshValue()
+  const redactor = new Redactor()
+  redactor.add(value, 60_000)
+  await delay(50)
+  assert.equal(redactor.scrub(value), REDACTION)
+  redactor.dispose()
 })

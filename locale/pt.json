@@ -6,7 +6,7 @@
   "ui": {
     "title": "Entrada privada de segredos",
     "value": "Valor secreto",
-    "privacy": "Seu segredo não é mostrado ao agente.",
+    "privacy": "Este valor vai para o armazenamento de credenciais do host, não para o chat.",
     "openUrl": "Abrir página de credenciais",
     "oneUse": "Este valor é salvo uma única vez e o agente recebe apenas uma referência a ele.",
     "fileNote": "Este valor é gravado em um arquivo privado apenas para este comando.",
