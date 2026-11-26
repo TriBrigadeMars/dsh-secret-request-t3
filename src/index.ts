@@ -14,6 +14,7 @@ import {
 } from './protocol.js'
 import { SecretBroker } from './broker.js'
 import { FileDelivery, type AtRest } from './files.js'
+import { Redactor } from './redact.js'
 
 /**
  * The host timer service (cordis-plugin-timer) as this plugin uses it. Reached
@@ -85,11 +86,13 @@ export function apply(ctx: Context) {
   const completed = new Map<string, IdempotencyEntry>()
   const broker = new SecretBroker()
   const files = new FileDelivery()
+  const redactor = new Redactor()
   const lifetime = new AbortController()
   let lastClientSeen = 0
 
   ctx.provide('secretRefs', broker)
   ctx.effect(() => () => broker.dispose(), 'request-secret: broker')
+  ctx.effect(() => () => redactor.dispose(), 'request-secret: redaction')
   ctx.effect(() => () => { void files.disposeAll() }, 'request-secret: delivered files')
 
   ctx.effect(
@@ -103,18 +106,51 @@ export function apply(ctx: Context) {
   // Exit binding for commands that run through the tool executor: this settles
   // on both success and failure, so a delivered file disappears when the call
   // that named its path finishes. `request_secret` is excluded so a file
-  // survives the call that created it.
+  // survives the call that created it. The same hook scrubs tracked value
+  // variants out of the model-facing text before the result is persisted.
+  // Scrubbing is best-effort defence in depth, never a guarantee; a bug in it
+  // must not fail the user's call, and it must not skip file cleanup.
   ctx.on('tools/post-execute', async (exec, result, next) => {
     const decision = await next()
+    let outcome = decision
     try {
-      if (exec.name !== 'request_secret' && exec.agent) {
-        const text = safeStringify(exec.arguments) + safeStringify(result.content)
-        await files.removeReferenced(exec.agent.session.id, text)
+      // 1. File cleanup first so a scrubbing failure cannot leave a file behind.
+      try {
+        if (exec.name !== 'request_secret' && exec.agent) {
+          const text = safeStringify(exec.arguments) + safeStringify(result.content)
+          await files.removeReferenced(exec.agent.session.id, text)
+        }
+      } catch {
+        // Cleanup must never fail the user's tool call.
+      }
+
+      // 2. Replace tracked variants in text blocks.
+      try {
+        if (decision.kind === 'accept') {
+          const blocks = decision.content ?? result.content
+          const scrubbed = blocks.map((block) =>
+            block.type === 'text' ? { ...block, text: redactor.scrub(block.text) } : block
+          )
+          const changed = scrubbed.some((block, index) => block !== blocks[index])
+          // A value replacement re-renders through the tool definition; do not
+          // fight it with a content replacement. `additionalContexts` survives.
+          if (changed && !Object.hasOwn(decision, 'value')) {
+            outcome = {
+              kind: 'accept',
+              content: scrubbed,
+              ...(decision.additionalContexts === undefined
+                ? {}
+                : { additionalContexts: decision.additionalContexts }),
+            }
+          }
+        }
+      } catch {
+        // Redaction is best-effort; the original result is still returned.
       }
     } catch {
-      // Cleanup must never fail the user's tool call.
+      // Belt and braces: nothing in this hook may fail the user's tool call.
     }
-    return decision
+    return outcome
   })
 
   /**
@@ -201,6 +237,9 @@ export function apply(ctx: Context) {
             value,
             ttlMs: remaining,
           })
+          // Track before settling the call so a consumer that echoes the value
+          // in the very next step is already scrubbed.
+          redactor.add(value)
           saveExpiry(minted.secretRef, minted.expiresAt)
           saved = true
           request.finish('saved', {
@@ -218,6 +257,7 @@ export function apply(ctx: Context) {
             value,
             ttlMs: remaining,
           })
+          redactor.add(value)
           try {
             schedule(() => void files.remove(file), file.expiresAt - Date.now())
           } catch {
