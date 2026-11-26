@@ -106,7 +106,9 @@ await test('도구 런타임을 통해 입력을 비공개로 정확히 저장�
   assert.deepEqual(result.value, { status: 'saved', ref: args.ref })
   assert.deepEqual(JSON.parse(result.content[0].text), result.value)
   assert.equal((await h.ctx.credentials.resolve(credentialRef(args.ref))).value, secret)
-  assert.equal((await stat(h.path)).mode & 0o777, 0o600)
+  // Windows cannot express POSIX owner-only bits; the credential provider uses
+  // the OS default there, so the 0600 guarantee is asserted on POSIX only.
+  if (process.platform !== 'win32') assert.equal((await stat(h.path)).mode & 0o777, 0o600)
   assert.ok(!JSON.stringify([request, answer, result, seen]).includes('synthetic-$value-'))
   assert.deepEqual((await h.rpc('pending')).value, [])
   assert.equal((await h.rpc('answer', { id: request.id, action: 'save', value: 'overwrite' })).ok, false)
