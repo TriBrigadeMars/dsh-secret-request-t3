@@ -2,7 +2,7 @@ import { defineConfig, type UserConfig } from 'tsdown'
 import manifest from './package.json' with { type: 'json' }
 
 const nodeConfig = {
-  entry: ['src/index.ts', 'src/broker.ts', 'src/files.ts'],
+  entry: ['src/index.ts', 'src/broker.ts', 'src/files.ts', 'src/redact.ts'],
   format: 'esm',
   platform: 'node',
   target: 'node24',
