@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
-import { mkdtemp, rm, stat } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { Context } from '@deepseek-ai/cordis'
@@ -12,7 +12,7 @@ import { LocalCredentialProvider } from '@deepseek-ai/dsh-credentials-local'
 import Projections from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import * as plugin from '../dist/index.js'
 
 const owner = { principal: { kind: 'owner' }, interactions: 'answer' }
@@ -79,7 +79,7 @@ async function setup(t, provider) {
     }
     assert.fail('No private input request appeared')
   }
-  return { ctx, fork, rpc, run, next, path, child }
+  return { ctx, fork, rpc, run, next, path, child, agent }
 }
 
 await test('도구 런타임을 통해 입력을 비공개로 정확히 저장하고 참조와 상태만 반환한다', async (t) => {
@@ -209,6 +209,64 @@ const answerWith = async (h, request, value) => {
   return answer
 }
 
+const exists = async (path) => {
+  try {
+    await stat(path)
+    return true
+  } catch (error) {
+    assert.equal(error.code, 'ENOENT')
+    return false
+  }
+}
+
+/** Disposal and expiry removals are async; poll briefly instead of assuming a tick. */
+const waitGone = async (path, ms = 2000) => {
+  const deadline = Date.now() + ms
+  while (Date.now() < deadline) {
+    if (!(await exists(path))) return true
+    await delay(10)
+  }
+  return !(await exists(path))
+}
+
+const registerConsumer = (h, execute, name = 'consume_file', parameters = { path: { type: 'string', required: true } }) => {
+  h.ctx.tools.register(
+    defineTool({
+      name,
+      description: 'Test consumer for a delivered secret file.',
+      parameters,
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { length: { type: 'integer', required: true } },
+        },
+        render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+      },
+      execute,
+    })
+  )
+}
+
+/** Same executor pattern as `run`, for tools the tests register themselves. */
+const runTool = async (h, name, input = {}, caller = h.agent) => {
+  const batch = await h.ctx.tools.execute({
+    calls: [
+      {
+        type: 'tool-call',
+        id: `test-${name}`,
+        name,
+        arguments: JSON.stringify(input),
+      },
+    ],
+    agent: caller,
+    signal: new AbortController().signal,
+  })
+  assert.equal(batch.results.length, 1)
+  assert.equal(batch.results[0].callId, `test-${name}`)
+  return batch.results[0].result
+}
+
 await test('secretRef 모드는 일회용 참조만 반환하고 제출한 값을 결과에 남기지 않는다', async (t) => {
   const h = await setup(t)
   await h.rpc('pending')
@@ -249,19 +307,146 @@ await test('발급된 secretRef는 같은 세션에서 정확히 한 번만 값�
   )
 })
 
-await test('file 배달은 아직 구현되지 않았으므로 unavailable로 정직하게 답한다', async (t) => {
+await test('file 모드는 비공개 파일 경로만 반환하고 제출한 값을 결과에 남기지 않는다', async (t) => {
   const h = await setup(t)
   await h.rpc('pending')
   const value = freshValue()
   const running = h.run(deliveryArgs({ delivery: 'file' }))
   const request = await h.next()
   assert.equal(request.delivery, 'file')
-  await answerWith(h, request, value)
+  const answer = await answerWith(h, request, value)
   const result = await running
+
+  assert.equal(result.isError, false)
+  assert.equal(result.value.status, 'saved')
+  assert.equal(result.value.delivery, 'file')
+  assert.equal(typeof result.value.path, 'string')
+  assert.ok(Number.isInteger(result.value.expiresAt))
+  assert.ok(result.value.expiresAt > Date.now())
+  if (process.platform === 'win32') {
+    // ACLs are best effort; report whichever guarantee the host actually met.
+    assert.ok(result.value.atRest === 'windows-acl' || result.value.atRest === 'unrestricted')
+  } else {
+    assert.equal(result.value.atRest, 'posix-0600')
+    assert.equal((await stat(result.value.path)).mode & 0o777, 0o600)
+    assert.equal((await stat(dirname(result.value.path))).mode & 0o777, 0o700)
+  }
+  assert.equal(await readFile(result.value.path, 'utf8'), value)
+  assert.ok(!JSON.stringify(result).includes(value))
+  assert.ok(!result.content[0].text.includes(value))
+  assert.ok(!JSON.stringify([request, answer]).includes(value))
+  assert.deepEqual((await h.rpc('pending')).value, [])
+})
+
+await test('file 모드는 서브에이전트에게 unavailable로 남는다', async (t) => {
+  const h = await setup(t)
+  await h.rpc('pending')
+  const result = await h.run(deliveryArgs({ delivery: 'file' }), undefined, h.child)
   assert.equal(result.isError, false)
   assert.deepEqual(result.value, { status: 'unavailable' })
-  assert.ok(!JSON.stringify(result).includes(value))
   assert.deepEqual((await h.rpc('pending')).value, [])
+})
+
+await test('파일을 소비한 도구 호출이 성공하면 파일과 디렉터리를 삭제한다', async (t) => {
+  const h = await setup(t)
+  await h.rpc('pending')
+  const value = freshValue()
+  const running = h.run(deliveryArgs({ delivery: 'file' }))
+  const request = await h.next()
+  await answerWith(h, request, value)
+  const { path } = (await running).value
+  const directory = dirname(path)
+
+  registerConsumer(h, async (args) => ({ length: (await readFile(args.path, 'utf8')).length }))
+  const consumed = await runTool(h, 'consume_file', { path })
+  assert.equal(consumed.isError, false)
+  assert.deepEqual(consumed.value, { length: value.length })
+  assert.equal(await exists(path), false)
+  assert.equal(await exists(directory), false)
+})
+
+await test('파일을 소비한 도구 호출이 실패해도 파일을 삭제한다', async (t) => {
+  const h = await setup(t)
+  await h.rpc('pending')
+  const value = freshValue()
+  const running = h.run(deliveryArgs({ delivery: 'file' }))
+  const request = await h.next()
+  await answerWith(h, request, value)
+  const { path } = (await running).value
+  const directory = dirname(path)
+
+  registerConsumer(h, async (args) => {
+    await readFile(args.path, 'utf8')
+    throw new Error('consumer failed')
+  })
+  const consumed = await runTool(h, 'consume_file', { path })
+  assert.equal(consumed.isError, true)
+  assert.equal(await exists(path), false)
+  assert.equal(await exists(directory), false)
+})
+
+await test('경로를 언급하지 않는 도구 호출은 파일을 남겨 둔다', async (t) => {
+  const h = await setup(t)
+  await h.rpc('pending')
+  const value = freshValue()
+  const running = h.run(deliveryArgs({ delivery: 'file' }))
+  const request = await h.next()
+  await answerWith(h, request, value)
+  const { path } = (await running).value
+
+  registerConsumer(h, async () => ({ length: 0 }), 'unrelated_read', {})
+  const unrelated = await runTool(h, 'unrelated_read', {})
+  assert.equal(unrelated.isError, false)
+  assert.equal(await exists(path), true)
+})
+
+await test('유효 시간이 지나면 소비되지 않은 파일도 삭제한다', async (t) => {
+  const h = await setup(t)
+  await h.rpc('pending')
+  const value = freshValue()
+  const running = h.run(deliveryArgs({ delivery: 'file', timeoutMs: 1000 }))
+  const request = await h.next()
+  await answerWith(h, request, value)
+  const { path } = (await running).value
+  const directory = dirname(path)
+
+  await delay(1200)
+  assert.equal(await waitGone(path), true)
+  assert.equal(await waitGone(directory), true)
+})
+
+await test('플러그인이 해제되면 전달된 파일을 삭제한다', async (t) => {
+  const h = await setup(t)
+  await h.rpc('pending')
+  const value = freshValue()
+  const running = h.run(deliveryArgs({ delivery: 'file' }))
+  const request = await h.next()
+  await answerWith(h, request, value)
+  const { path } = (await running).value
+  const directory = dirname(path)
+
+  await h.ctx.fiber.dispose()
+  assert.equal(await waitGone(path), true)
+  assert.equal(await waitGone(directory), true)
+})
+
+await test('다른 세션의 소비 호출은 파일을 삭제하지 않는다', async (t) => {
+  const h = await setup(t)
+  await h.rpc('pending')
+  const value = freshValue()
+  const running = h.run(deliveryArgs({ delivery: 'file' }))
+  const request = await h.next()
+  await answerWith(h, request, value)
+  const { path } = (await running).value
+
+  registerConsumer(h, async (args) => ({ length: (await readFile(args.path, 'utf8')).length }))
+  const foreign = await runTool(h, 'consume_file', { path }, { session: { id: 'another-session', header: {} } })
+  assert.equal(foreign.isError, false)
+  assert.equal(await exists(path), true)
+
+  const own = await runTool(h, 'consume_file', { path })
+  assert.equal(own.isError, false)
+  assert.equal(await exists(path), false)
 })
 
 await test('같은 clientRequestId 재시도는 새로 발급하지 않고 같은 결과를 돌려준다', async (t) => {

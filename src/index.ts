@@ -13,6 +13,7 @@ import {
   type SecretStatus,
 } from './protocol.js'
 import { SecretBroker } from './broker.js'
+import { FileDelivery, type AtRest } from './files.js'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -35,6 +36,7 @@ interface ToolResultValue {
   secretRef?: string
   path?: string
   expiresAt?: number
+  atRest?: AtRest
 }
 
 type ResultExtra = Omit<ToolResultValue, 'status'>
@@ -70,15 +72,26 @@ const defaultTimeoutMs = 600_000
 const maxDeliveryTimeoutMs = 3_600_000
 const idempotencyRetentionMs = 60_000
 
+/** Best-effort JSON for path scraping; never throws on cyclic or exotic values. */
+const safeStringify = (value: unknown): string => {
+  try {
+    return JSON.stringify(value) ?? ''
+  } catch {
+    return ''
+  }
+}
+
 export function apply(ctx: Context) {
   const pending = new Map<string, Pending>()
   const completed = new Map<string, IdempotencyEntry>()
   const broker = new SecretBroker()
+  const files = new FileDelivery()
   const lifetime = new AbortController()
   let lastClientSeen = 0
 
   ctx.provide('secretRefs', broker)
   ctx.effect(() => () => broker.dispose(), 'request-secret: broker')
+  ctx.effect(() => () => { void files.disposeAll() }, 'request-secret: delivered files')
 
   ctx.effect(
     () => async () => {
@@ -88,23 +101,50 @@ export function apply(ctx: Context) {
     'request-secret: pending requests'
   )
 
+  // Exit binding for commands that run through the tool executor: this settles
+  // on both success and failure, so a delivered file disappears when the call
+  // that named its path finishes. `request_secret` is excluded so a file
+  // survives the call that created it.
+  ctx.on('tools/post-execute', async (exec, result, next) => {
+    const decision = await next()
+    try {
+      if (exec.name !== 'request_secret' && exec.agent) {
+        const text = safeStringify(exec.arguments) + safeStringify(result.content)
+        await files.removeReferenced(exec.agent.session.id, text)
+      }
+    } catch {
+      // Cleanup must never fail the user's tool call.
+    }
+    return decision
+  })
+
   /**
-   * Schedule one one-use reference's expiry through the host timer seam. The
-   * lazy `Date.now()` check in `consume` remains authoritative if this timer
-   * never fires or the seam is unavailable in a minimal host.
+   * Run one cleanup callback through the host timer seam when the host has one,
+   * else through an unref'd host timer. Both expiry and file removal share this
+   * path so a minimal test Context behaves like production.
    */
-  const scheduleExpiry = (secretRef: string, ttlMs: number): void => {
-    const fire = () => broker.expire(secretRef)
-    const delay = Math.max(0, ttlMs)
-    if (typeof ctx.timeout === 'function') {
-      try {
+  const schedule = (fire: () => void, delayMs: number): void => {
+    const delay = Math.max(0, delayMs)
+    try {
+      // Reading an uninjected cordis service throws, so the probe must be
+      // inside the same guard as the call.
+      if (typeof ctx.timeout === 'function') {
         ctx.timeout(fire, delay)
         return
-      } catch {
-        // Fall through to a plain timer; consume() still enforces the deadline.
       }
+    } catch {
+      // No timer service in this host; fall through to a plain timer.
     }
     setTimeout(fire, delay).unref()
+  }
+
+  /**
+   * Schedule one one-use reference's expiry. The lazy `Date.now()` check in
+   * `consume` remains authoritative if this timer never fires or the seam is
+   * unavailable in a minimal host.
+   */
+  const scheduleExpiry = (secretRef: string, ttlMs: number): void => {
+    schedule(() => broker.expire(secretRef), ttlMs)
   }
 
   const saveExpiry = (secretRef: string, expiresAt: number): void => {
@@ -169,9 +209,28 @@ export function apply(ctx: Context) {
             expiresAt: minted.expiresAt,
           })
         } else {
-          // File delivery is a later slice. Never fall back to writing the value somewhere else.
+          // File delivery: only the path is returned; the value lives solely in
+          // the private file and is removed when the consumer settles or expires.
+          const remaining = Math.max(0, (view.expiresAt ?? Date.now()) - Date.now())
+          const file = await files.create({
+            sessionId: view.sessionId,
+            callId: view.callId,
+            value,
+            ttlMs: remaining,
+          })
+          try {
+            schedule(() => void files.remove(file), file.expiresAt - Date.now())
+          } catch {
+            // Delivery succeeded; the file is still removed by post-execute or
+            // by an explicit call, and a stale timer only costs disk space.
+          }
           saved = true
-          request.finish('unavailable')
+          request.finish('saved', {
+            delivery: 'file',
+            path: file.path,
+            expiresAt: file.expiresAt,
+            atRest: file.atRest,
+          })
         }
       } catch {
         // Credential providers may include the submitted value in an exception.
@@ -330,7 +389,8 @@ export function apply(ctx: Context) {
       description:
         'Ask the user for a secret through a private password form. Pass only a label, a reason and a delivery mode, NEVER the secret value. ' +
         'delivery:"secretRef" returns a one-use opaque reference held only in host memory: it is never persisted, is lost on host restart, and works once. ' +
-        'delivery:"file" is not available in this version. ' +
+        'delivery:"file" writes the value to a private file and returns only its path: on POSIX a 0600 file inside a 0700 per-request temp directory, on Windows a directory whose inherited ACLs are replaced (falling back to the OS default when that hardening fails). ' +
+        'The file is deleted when the consuming tool call settles or when its TTL expires. Commands promoted outside the tool executor are not observed, so their file survives until expiry. ' +
         'The legacy ref mode stores the value in the host-wide DSH credential store, replacing any value at that reference; it is NOT exported to shell environment variables or the project .env. ' +
         'Requires the plugin in an open DSH web UI. Never ask for secrets in chat or read the credential file.',
       parameters: {
@@ -358,7 +418,7 @@ export function apply(ctx: Context) {
           type: 'string',
           enum: ['secretRef', 'file'],
           description:
-            'How to deliver the value when ref is absent. secretRef is a one-use in-memory reference; file is not implemented.',
+            'How to deliver the value when ref is absent. secretRef is a one-use in-memory reference; file is a private file path (0600 in a 0700 temp directory on POSIX) deleted when the consuming tool call settles or at expiry.',
         },
         url: { type: 'string', description: 'Optional http(s) page that needs the secret, for context.' },
         placeholder: { type: 'string', description: 'Optional input placeholder shown to the user.' },
@@ -382,6 +442,7 @@ export function apply(ctx: Context) {
             secretRef: { type: 'string' },
             path: { type: 'string' },
             expiresAt: { type: 'integer' },
+            atRest: { type: 'string' },
           },
         },
         render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
