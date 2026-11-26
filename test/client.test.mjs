@@ -115,3 +115,142 @@ await test('모든 지원 로케일은 같은 메타데이터와 입력 카드 �
     if (!['en', 'ko', 'zh'].includes(language)) assert.equal(manifest.market.title[language], locale.meta.title)
   }
 })
+
+const english = JSON.parse(await readFile(new URL('../locale/en.json', import.meta.url), 'utf8')).ui
+
+/** Mount the real built client plugin and return its registered tool-call card. */
+async function mountCard(request) {
+  let card
+  let plugin
+  const effects = []
+  const jsx = (type, props) => (typeof type === 'function' ? type(props) : { type, props })
+  runInNewContext(source, {
+    AbortController,
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    document: { createElement: () => ({ remove() {} }), head: { append() {} } },
+    window: {
+      __ModuleLoader__: {
+        load({ factory }) {
+          plugin = factory((name) => {
+            if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx }
+            if (name === 'react')
+              return {
+                useCallback: (callback) => callback,
+                useRef: () => ({ current: null }),
+                useEffect: () => {},
+                useState: (value) => [typeof value === 'function' ? value() : value, () => {}],
+                useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
+              }
+            throw new Error(`Unexpected dependency: ${name}`)
+          })
+        },
+      },
+    },
+  })
+  const connection = {
+    interactions: 'answer',
+    rpc: { call: async () => ({ ok: true, value: request ? [request] : [] }) },
+  }
+  plugin.apply({
+    get: () => connection,
+    locale: { getSnapshot: () => ({ active: 'en' }), subscribe: () => () => {} },
+    slots: {
+      inject: (_name, callback) => callback(),
+      register: (_spec, component) => {
+        card = component
+      },
+    },
+    effect: (effect) => effects.push(effect()),
+  })
+  await new Promise(setImmediate)
+  return { card, effects }
+}
+
+function collect(tree) {
+  const nodes = []
+  const visit = (node) => {
+    if (!node || typeof node !== 'object') return
+    if (Array.isArray(node)) return node.forEach(visit)
+    nodes.push(node)
+    visit(node.props?.children)
+  }
+  visit(tree)
+  return nodes
+}
+
+const runningBlock = () => ({ args: { text: () => 'DECEPTIVE_TARGET' }, content: [] })
+
+await test('실행 중인 카드는 열기 링크·플레이스홀더·일회용 안내·만료 힌트를 표시한다', async () => {
+  const request = {
+    id: 'request-id',
+    sessionId: 'session',
+    callId: 'call',
+    ref: 'PRODUCTION_TOKEN',
+    label: 'Harmless test token',
+    reason: 'Save only a test token',
+    configured: true,
+    delivery: 'secretRef',
+    expiresAt: Date.now() + 60_000,
+    url: 'https://example.com/login',
+    placeholder: 'sk-…',
+  }
+  const { card, effects } = await mountCard(request)
+  const tree = card({ sessionId: 'session', callId: 'call', phase: 'running', block: runningBlock() })
+  const nodes = collect(tree)
+  const anchor = nodes.find((node) => node.type === 'a')
+  assert.ok(anchor, 'a link to the credential page is rendered')
+  assert.equal(anchor.props.href, 'https://example.com/login')
+  assert.equal(anchor.props.target, '_blank')
+  assert.match(anchor.props.rel, /noopener/)
+  assert.match(anchor.props.rel, /noreferrer/)
+  assert.ok(anchor.props.children === english.openUrl)
+  assert.notEqual(anchor.props.type, 'submit', 'the link never submits the form')
+  const input = nodes.find((node) => node.type === 'input')
+  assert.equal(input.props.placeholder, 'sk-…')
+  assert.equal(input.props.type, 'password')
+  const rendered = JSON.stringify(tree)
+  assert.ok(rendered.includes(english.oneUse), 'secretRef shows the one-use note')
+  assert.ok(!rendered.includes(english.fileNote), 'file note is not shown for secretRef')
+  assert.ok(rendered.includes(english.expiresIn.split('{seconds}')[0]), 'remaining time hint is rendered')
+  assert.ok(!rendered.includes('{seconds}'), 'locale token is substituted')
+  effects.forEach((dispose) => dispose?.())
+})
+
+await test('만료된 결과 카드는 만료 상태와 재요청 안내를 표시한다', async () => {
+  const { card, effects } = await mountCard(null)
+  const tree = card({
+    sessionId: 'session',
+    callId: 'call',
+    phase: 'result',
+    block: {
+      args: { text: () => 'Harmless test token' },
+      isError: false,
+      content: [{ type: 'text', text: JSON.stringify({ status: 'timed_out' }) }],
+    },
+  })
+  const rendered = JSON.stringify(tree)
+  assert.ok(rendered.includes(english.timed_out), 'expired status is shown')
+  assert.ok(rendered.includes(english.expiredHint), 'expired hint asks for a new request')
+  effects.forEach((dispose) => dispose?.())
+})
+
+await test('기존 요청은 기존 개인정보 안내만 표시하고 일회용·파일 안내는 숨긴다', async () => {
+  const request = {
+    id: 'request-id',
+    sessionId: 'session',
+    callId: 'call',
+    label: 'Harmless test token',
+    reason: 'Save only a test token',
+    configured: false,
+  }
+  const { card, effects } = await mountCard(request)
+  const tree = card({ sessionId: 'session', callId: 'call', phase: 'running', block: runningBlock() })
+  const rendered = JSON.stringify(tree)
+  assert.ok(rendered.includes(english.privacy), 'legacy privacy note still renders')
+  assert.ok(!rendered.includes(english.oneUse), 'no one-use note for legacy requests')
+  assert.ok(!rendered.includes(english.fileNote), 'no file note for legacy requests')
+  const input = collect(tree).find((node) => node.type === 'input')
+  assert.equal(input.props.placeholder, english.value)
+  effects.forEach((dispose) => dispose?.())
+})
