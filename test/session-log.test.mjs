@@ -19,6 +19,7 @@ import { LocalCredentialProvider } from '@deepseek-ai/dsh-credentials-local'
 import * as Connection from '@deepseek-ai/dsh-client-connection'
 import { REDACTION } from '../dist/redact.js'
 import * as plugin from '../dist/index.js'
+import { assertNoDecodedVariant } from './decoded-strings.mjs'
 
 const owner = { principal: { kind: 'owner' }, interactions: 'answer' }
 const sessionId = 'redaction-e2e'
@@ -32,6 +33,7 @@ const freshValue = () => 'ts_' + randomBytes(12).toString('hex') + '/+=&? '
 
 const variantsOf = (value) => [
   value,
+  JSON.stringify(value).slice(1, -1),
   Buffer.from(value).toString('base64'),
   Buffer.from(value).toString('base64url'),
   encodeURIComponent(value),
@@ -261,6 +263,14 @@ await test('세션 로그와 모델 요청 어디에도 해석된 비밀값이 �
     onDisk.push(text)
     for (const variant of variants) {
       assert.ok(!text.includes(variant), `${path} leaked a secret variant`)
+    }
+    // The log is JSON, so `"` and `\` are escaped in the bytes. A decoded walk
+    // of every string leaf is what catches an escaped echo.
+    if (path.endsWith('.jsonl')) {
+      for (const line of text.split('\n')) {
+        if (line.trim() === '') continue
+        assertNoDecodedVariant(JSON.parse(line), variants, path)
+      }
     }
   }
 

@@ -138,20 +138,26 @@ export function apply(ctx: Context) {
   })
 
   /**
-   * Check every post-scrub text channel for a tracked value. `accept` can only
-   * replace `content`; `meta`, deferred contexts, and an already-materialized
-   * frozen result are outside the decision's control. A match therefore means
-   * the value would reach persistence, and the call must be blocked.
+   * Check every decoded post-scrub channel for a tracked value. `accept` can
+   * only replace `content`; `meta`, deferred contexts, and an already-
+   * materialized frozen result are outside the decision's control. A match
+   * therefore means the value would reach persistence, and the call must be
+   * blocked.
+   *
+   * Each channel is inspected as decoded leaves, never as a serialized string:
+   * `JSON.stringify` escapes `"` and `\`, so a serialized check misses a value
+   * the decoded leaf still holds byte-for-byte. A line-oriented tool may also
+   * split the value across leaves or truncate one, which the leaf join covers.
    */
   const hasUnscrubbedValue = (result: ToolExecutionResult, decision: PostToolDecision): boolean => {
-    const channels = [
-      result.meta === undefined ? '' : safeStringify(result.meta),
-      safeStringify(decision.kind === 'accept' && decision.content !== undefined ? decision.content : result.content),
-      safeStringify(result.additionalContexts ?? []),
-      safeStringify(decision.additionalContexts ?? []),
-      result.isError ? result.error.message : '',
+    const channels: unknown[] = [
+      result.meta,
+      decision.kind === 'accept' && decision.content !== undefined ? decision.content : result.content,
+      result.additionalContexts,
+      decision.additionalContexts,
+      result.isError ? result.error.message : undefined,
     ]
-    return channels.some((text) => redactor.hasMatch(text, 8))
+    return channels.some((channel) => redactor.hasMatchInLeaves(channel, 8))
   }
 
   ctx.on('tools/post-execute', async (exec, result, next) => {

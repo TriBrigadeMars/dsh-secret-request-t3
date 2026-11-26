@@ -144,6 +144,46 @@ await test('hasMatch는 추적된 값이 텍스트에 남았는지 알려준다'
   assert.equal(redactor.hasMatch(value), false)
 })
 
+await test('hasMatchInLeaves는 직렬화된 텍스트가 아니라 디코딩된 문자열 잎에서 값을 찾는다', () => {
+  const value = 'js_' + randomBytes(8).toString('hex') + '"\\/+=&?'
+  const redactor = new Redactor()
+  redactor.add(value)
+
+  // The pre-fix gate inspected this serialized text: `"` and `\` are escaped,
+  // so the raw value never occurs and a raw-byte match missed it.
+  const meta = { lines: [{ number: 1, text: value }] }
+  const serialized = JSON.stringify(meta)
+  assert.ok(!serialized.includes(value), 'the serialized form hides the raw value')
+  assert.equal(redactor.hasMatchInLeaves(meta), true, 'the decoded leaf carries the value')
+
+  // A JSON-escaped echo is also tracked directly.
+  assert.equal(redactor.hasMatch(`prefix ${JSON.stringify(value).slice(1, -1)} suffix`), true)
+  assert.equal(redactor.hasMatchInLeaves({ text: 'unrelated output' }), false)
+  assert.equal(redactor.hasMatchInLeaves([]), false)
+  assert.equal(redactor.hasMatchInLeaves(undefined), false)
+  assert.equal(redactor.hasMatchInLeaves(42), false)
+  redactor.dispose()
+})
+
+await test('줄바꿈 값은 각 줄을, 2000자 초과 값은 잘린 앞부분을 추적한다', () => {
+  const id = randomBytes(8).toString('hex')
+  const multi = `ln_${id}_line1\nln_${id}_line2`
+  const long = `lg_${id}_` + 'A'.repeat(2500)
+  const redactor = new Redactor()
+  redactor.add(multi)
+  redactor.add(long)
+
+  // `read` persists each line of a multi-line value as its own leaf.
+  assert.equal(redactor.hasMatchInLeaves({ lines: multi.split('\n').map((text) => ({ text })) }), true)
+  assert.equal(redactor.hasMatch(`prefix ${multi.split('\n')[0]} suffix`), true)
+
+  // `read` truncates a long line to its first 2000 characters plus a suffix.
+  const truncated = long.slice(0, 2000) + '... (line truncated to 2000 chars)'
+  assert.equal(redactor.hasMatch(truncated), true)
+  assert.equal(redactor.hasMatchInLeaves({ lines: [{ text: truncated }] }), true)
+  redactor.dispose()
+})
+
 await test('요청한 긴 TTL 동안에는 값이 계속 지워진다', async () => {
   const value = freshValue()
   const redactor = new Redactor()
