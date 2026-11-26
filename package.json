@@ -1,0 +1,112 @@
+{
+  "name": "dsh-secret-request-t3",
+  "version": "0.5.0",
+  "description": "T3 Code-compatible request_secret for DeepSeek Harness: one-use secretRef and command-scoped file delivery, with an honest threat model.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TriBrigadeMars/dsh-secret-request-t3.git"
+  },
+  "files": [
+    "dist",
+    "locale",
+    "cordis.patch.yml",
+    "THIRD_PARTY_NOTICES"
+  ],
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js",
+    "./client": "./dist/client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.mjs",
+    "verify": "npm run build && npm run typecheck && npm test",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.2.0-alpha.1",
+    "@deepseek-ai/dsh-agent": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-connection": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-locale": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-ui-session": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-ui-tool": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-credentials": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-credentials-local": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-session-projection": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-system-prompt": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-tool-executor-native": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-tools": "0.2.3-alpha.2",
+    "@types/node": "26.6.6",
+    "@types/react": "18.3.31",
+    "react": "18.3.1",
+    "tsdown": "0.23.7",
+    "typescript": "7.0.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.2.0-alpha.1",
+    "@deepseek-ai/dsh-agent": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-connection": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-credentials": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-tools": "0.2.3-alpha.2"
+  },
+  "engines": {
+    "dsh": "0.2.3-alpha.2",
+    "node": ">=26.13.1"
+  },
+  "market": {
+    "order": 6,
+    "title": {
+      "en": "Secret input",
+      "ko": "비밀값 입력",
+      "zh": "私密凭据输入",
+      "ja": "非公開のシークレット入力",
+      "es": "Entrada privada de secretos",
+      "fr": "Saisie privée de secrets",
+      "de": "Private Eingabe geheimer Werte",
+      "ru": "Приватный ввод секретов",
+      "pt": "Entrada privada de segredos"
+    },
+    "description": {
+      "en": "Shows a credential input card in the conversation and passes the value to the DSH secret store, never to the model.",
+      "ko": "도구 호출 위치에 비밀값 입력 카드를 표시하고, 입력값을 DSH 비밀값 저장소로만 전달합니다.",
+      "zh": "在对话中显示凭据输入卡片，仅将输入值传递到 DSH 私密存储，绝不传递给模型。",
+      "ja": "会話内に認証情報の入力カードを表示し、値を DSH のシークレットストアに渡します。モデルには決して渡しません。",
+      "es": "Muestra una tarjeta de entrada de credenciales en la conversación y envía el valor al almacén de secretos de DSH, nunca al modelo.",
+      "fr": "Affiche une carte de saisie des identifiants dans la conversation et transmet la valeur au stockage de secrets DSH, jamais au modèle.",
+      "de": "Zeigt eine Eingabekarte für Zugangsdaten im Gespräch an und übergibt den Wert an den DSH-Geheimnisspeicher, niemals an das Modell.",
+      "ru": "Показывает карточку ввода учётных данных в беседе и передаёт значение в хранилище секретов DSH, но никогда не передаёт его модели.",
+      "pt": "Mostra um cartão de entrada de credenciais na conversa e envia o valor ao armazenamento de segredos do DSH, nunca ao modelo."
+    },
+    "category": "tools",
+    "labels": [],
+    "keywords": [
+      "secret",
+      "credentials",
+      "approval",
+      "tool"
+    ]
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-tool"
+      ]
+    }
+  }
+}

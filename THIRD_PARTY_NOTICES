@@ -1,0 +1,28 @@
+# Third-party notices
+
+This project is a fork of **`@dungsil/dsh-plugin-tool-secret-request` 0.4.0**
+(`packages/tool-secret-request` in <https://github.com/dungsil/dsh-plugins>),
+licensed MIT, Copyright (c) 2026 dungsil. The upstream license text is kept
+verbatim in [`LICENSE.upstream`](./LICENSE.upstream).
+
+## Vendored source
+
+The upstream package imports two packages that are `private: true` in its
+monorepo and are not published to npm. A standalone fork cannot resolve them,
+so the following files are copied verbatim (MIT, Copyright (c) 2026 dungsil)
+with a provenance header:
+
+| File | Upstream |
+| --- | --- |
+| `src/vendor/rpc.ts` | `@dungsil/dsh-plugin-server@0.0.0`, `tools/plugin-server/src/rpc.ts` |
+| `src/vendor/locale.ts` | `@dungsil/dsh-ui@0.0.0`, `tools/ui/src/client.ts` |
+
+No other upstream source is copied beyond the package that was forked. The
+T3 Code `request_secret` contract this fork targets was read from
+`pingdotgg/t3code`; no T3 Code source is copied.
+
+## Runtime dependencies
+
+At runtime this plugin imports only `@deepseek-ai/*` packages supplied by the
+DeepSeek Harness host, plus Node built-ins. It bundles no third-party npm
+code and has no native modules.
